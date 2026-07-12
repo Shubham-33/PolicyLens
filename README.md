@@ -1,10 +1,12 @@
 # PolicyLens 🔍
 
-**A retrieval-grounded policy & FAQ assistant.** Upload a policy document, ask a
-question in plain English, and get an answer that is **grounded only in your
-document** — with clickable citations that jump to the exact source passage,
+**A compliance-grade answer engine for policy documents — self-hostable, so it
+never leaves the bank's own infrastructure.** Upload one or more policy documents,
+ask a question in plain English, and get an answer **grounded only in your
+documents** — with clickable citations that jump to the exact source passage,
 NotebookLM-style. If the answer isn't in your documents, PolicyLens says so
-instead of guessing.
+instead of guessing. Every answer is traceable to its source: an audit trail, not
+just a chat reply.
 
 Built for the IDBI / Hack2Skill hackathon.
 
@@ -15,19 +17,32 @@ Built for the IDBI / Hack2Skill hackathon.
 
 ## The problem
 
-Bank policy documents are long, dense, and change often. Customers and staff ask
-the same questions ("What's the minimum balance?", "What's the ATM charge?") and
-either dig through PDFs or get an answer with **no traceable source**. A plain
-chatbot will confidently *hallucinate* a wrong charge — unacceptable for banking.
+Bank policy and product documents are long, dense, and revised constantly. The
+same handful of questions ("What's the minimum balance? What's the ATM charge?
+When does an account go dormant?") gets asked thousands of times.
+
+- **Volume** — a single retail branch fields *dozens* of policy questions a day;
+  a contact centre, thousands. Most are re-asks of the same few facts.
+- **Cost of a wrong answer** — quoting the wrong charge or eligibility rule is a
+  **mis-selling / compliance exposure**, not a typo. In banking, a confidently
+  wrong answer is worse than no answer.
+- **Why not a generic chatbot** — a public LLM can't ingest confidential policy
+  docs (data-residency), and it *hallucinates*. Neither is acceptable here.
+
+PolicyLens answers from the bank's own documents, on the bank's own infra, and
+**cites its source every time** — so the answer is auditable.
 
 ## The approach: grounding, not fine-tuning
 
-PolicyLens uses **Retrieval-Augmented Generation (RAG)**:
+PolicyLens uses **Retrieval-Augmented Generation (RAG)** with hybrid retrieval:
 
-1. **Ingest** — the document is split into overlapping passages.
-2. **Retrieve** — a TF-IDF index finds the passages most relevant to the question.
-3. **Generate** — NVIDIA NIM (`llama-3.1-8b-instruct`) answers using *only* those
-   passages and cites each one; the UI links every `[n]` marker to its source.
+1. **Ingest** — each document is split into overlapping passages and (when a key
+   is present) embedded with NVIDIA `nv-embedqa-e5-v5`.
+2. **Retrieve** — a **hybrid** ranker blends semantic similarity (embeddings) with
+   lexical TF-IDF, so a question about an *"inactive"* account still finds the
+   passage that says *"dormant"*. Falls back to pure TF-IDF with no key.
+3. **Generate** — NVIDIA NIM (`llama-3.1-8b-instruct`) answers using *only* the
+   retrieved passages and cites each one; the UI links every `[n]` to its source.
 
 Why not fine-tune a model on the FAQ? Fine-tuning bakes facts into weights you
 can't cite, goes stale the moment a policy changes, and can still hallucinate.
@@ -38,24 +53,34 @@ upload a new document — the right call for compliance-sensitive banking conten
 ## Key features
 
 - 📎 **Citations you can click** — every claim links to the exact source passage.
+- 🧠 **Hybrid semantic + keyword retrieval** — finds answers by *meaning*, not just
+  matching words; recovers paraphrases keyword search misses.
+- 📚 **Multi-document** — load several policies; ask across all of them at once;
+  each citation names its source document.
 - 🚫 **No hallucination** — off-topic questions are refused, not answered.
-- 📄 **Bring your own doc** — drag-and-drop PDF, `.txt`, or `.md`, or load the sample.
-- ⚡ **Works offline** — with no API key it falls back to a deterministic extractive
-  answer, so the demo (and the whole test suite) never depends on the network.
-- ♿ **Accessible** — semantic HTML, ARIA, keyboard shortcuts, WCAG-AA contrast.
+- 🔒 **Private per session** — each browser session has its own isolated corpus;
+  concurrent users never see each other's documents.
+- 🏦 **Self-hostable** — open model via NVIDIA NIM; no data leaves your infra.
+- ⚡ **Degrades gracefully** — with no API key it falls back to deterministic
+  lexical retrieval + extractive answers, so the demo (and the whole test suite)
+  never depends on the network.
+- ♿ **Accessible** — semantic HTML, ARIA, keyboard shortcuts, WCAG-AA contrast
+  (Lighthouse: Accessibility 100, Best Practices 100).
 
 ## Architecture
 
 ```
 web/
-├── app.py          Flask routes + middleware (gzip, caching, security headers)
-├── rag.py          TF-IDF retrieval — pure Python, deterministic, zero ML deps
-├── nim.py          NVIDIA NIM grounded generation + offline extractive fallback
-├── ingest.py       PDF / txt / md  ->  page texts
-├── sample_data.py  bundled sample policy for a cold-click demo
-├── templates/      single-page UI
-├── static/         app.js (citation wiring) + app.css
-└── tests/          64 tests, 100% coverage gate
+├── app.py            Flask routes + middleware (gzip, caching, security headers)
+├── rag.py            Retrieval core — TF-IDF + hybrid semantic ranking (pure Python)
+├── embed.py          NVIDIA embeddings for semantic recall, with a no-op fallback
+├── nim.py            NVIDIA NIM grounded generation + offline extractive fallback
+├── ingest.py         PDF / txt / md  ->  page texts
+├── session_store.py  disk-backed per-session corpora (multi-worker safe)
+├── sample_data.py    bundled sample policy for a cold-click demo
+├── templates/        single-page UI
+├── static/           app.js (citation wiring) + app.css
+└── tests/            96 tests, 100% coverage gate
 ```
 
 ## Run locally
