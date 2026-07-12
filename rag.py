@@ -22,7 +22,9 @@ from typing import Final
 CHUNK_TARGET_CHARS: Final[int] = 700
 CHUNK_OVERLAP_CHARS: Final[int] = 120
 DEFAULT_TOP_K: Final[int] = 4
-MIN_SCORE: Final[float] = 0.03  # below this a chunk is treated as irrelevant
+MIN_SCORE: Final[float] = 0.03  # lexical floor: below this a chunk is irrelevant
+SEM_WEIGHT: Final[float] = 0.7  # weight of semantic vs lexical in hybrid ranking
+SEM_MIN: Final[float] = 0.08  # hybrid floor when embeddings are in play
 
 _TOKEN_RE: Final = re.compile(r"[a-z0-9]+")
 _PARA_RE: Final = re.compile(r"\n\s*\n")
@@ -112,17 +114,37 @@ def cosine(a: dict[str, float], b: dict[str, float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def cosine_dense(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two dense embedding vectors."""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 # ---------------------------------------------------------------------------
 # Index
 # ---------------------------------------------------------------------------
 
 
-class TfidfIndex:
-    """An in-memory TF-IDF index over a growing set of document chunks."""
+class RetrievalIndex:
+    """In-memory retrieval over many documents: TF-IDF by default, hybrid with
+    semantic embeddings when they are supplied.
+
+    Lexical TF-IDF is always built (instant, offline, deterministic). If per-chunk
+    embeddings are attached via :meth:`set_embeddings`, :meth:`search` blends
+    semantic and lexical similarity — recovering paraphrases that keyword search
+    alone would miss.
+    """
 
     def __init__(self) -> None:
         self._chunks: list[Chunk] = []
         self._vectors: list[dict[str, float]] = []
+        self._embeddings: dict[int, list[float]] = {}
         self._idf: dict[str, float] = {}
         self._doc_freq: dict[str, int] = {}
         self._next_id: int = 0
@@ -131,6 +153,22 @@ class TfidfIndex:
     def chunks(self) -> list[Chunk]:
         """All chunks currently indexed, in insertion order."""
         return list(self._chunks)
+
+    @property
+    def documents(self) -> list[dict[str, object]]:
+        """One entry per source document: id, name, and chunk count."""
+        order: list[str] = []
+        by_id: dict[str, dict[str, object]] = {}
+        for chunk in self._chunks:
+            if chunk.doc_id not in by_id:
+                by_id[chunk.doc_id] = {
+                    "doc_id": chunk.doc_id,
+                    "name": chunk.doc_name,
+                    "chunks": 0,
+                }
+                order.append(chunk.doc_id)
+            by_id[chunk.doc_id]["chunks"] = int(by_id[chunk.doc_id]["chunks"]) + 1
+        return [by_id[d] for d in order]
 
     @property
     def doc_names(self) -> list[str]:
@@ -144,13 +182,18 @@ class TfidfIndex:
         """True when nothing has been ingested yet."""
         return not self._chunks
 
-    def add_document(self, doc_id: str, doc_name: str, pages: list[str]) -> int:
+    def has_embeddings(self) -> bool:
+        """True when every chunk has an attached semantic embedding."""
+        return bool(self._chunks) and len(self._embeddings) == len(self._chunks)
+
+    def add_document(self, doc_id: str, doc_name: str, pages: list[str]) -> list[Chunk]:
         """Chunk and index a document supplied as a list of page texts.
 
-        Pass a single-element list for formats without pages (txt/markdown).
-        Returns the number of chunks added. Recomputes IDF over the full corpus.
+        Documents accumulate — call this repeatedly to search across several at
+        once. Pass a single-element list for formats without pages (txt/markdown).
+        Returns the chunks added (so the caller can embed them). Recomputes IDF.
         """
-        added = 0
+        added: list[Chunk] = []
         for page_no, page_text in enumerate(pages, start=1):
             has_pages = len(pages) > 1
             for piece in chunk_text(page_text):
@@ -158,7 +201,7 @@ class TfidfIndex:
                     id=self._next_id,
                     doc_id=doc_id,
                     doc_name=doc_name,
-                    ordinal=added,
+                    ordinal=len(added),
                     text=piece,
                     page=page_no if has_pages else None,
                 )
@@ -166,9 +209,29 @@ class TfidfIndex:
                 for term in set(tokenize(piece)):
                     self._doc_freq[term] = self._doc_freq.get(term, 0) + 1
                 self._next_id += 1
-                added += 1
+                added.append(chunk)
         self._recompute()
         return added
+
+    def set_embeddings(self, vectors: dict[int, list[float]]) -> None:
+        """Attach semantic vectors keyed by chunk id (from :meth:`add_document`)."""
+        self._embeddings.update(vectors)
+
+    def remove_document(self, doc_id: str) -> bool:
+        """Drop one document by id. Returns True if anything was removed."""
+        keep = [c for c in self._chunks if c.doc_id != doc_id]
+        if len(keep) == len(self._chunks):
+            return False
+        removed_ids = {c.id for c in self._chunks} - {c.id for c in keep}
+        for cid in removed_ids:
+            self._embeddings.pop(cid, None)
+        self._chunks = keep
+        self._doc_freq = {}
+        for chunk in self._chunks:
+            for term in set(tokenize(chunk.text)):
+                self._doc_freq[term] = self._doc_freq.get(term, 0) + 1
+        self._recompute()
+        return True
 
     def clear(self) -> None:
         """Drop every document and reset the index to empty."""
@@ -200,23 +263,46 @@ class TfidfIndex:
         norm = math.sqrt(sum(w * w for w in vector.values()))
         return {term: w / norm for term, w in vector.items()}
 
-    def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[Retrieved]:
+    def search(
+        self,
+        query: str,
+        top_k: int = DEFAULT_TOP_K,
+        query_embedding: list[float] | None = None,
+    ) -> list[Retrieved]:
         """Return the top-``top_k`` chunks for ``query``, ranked by similarity.
 
-        Chunks scoring below ``MIN_SCORE`` are dropped, so an off-topic question
-        yields an empty list — the signal the answer layer uses to refuse.
+        With a ``query_embedding`` and fully-embedded chunks, ranking is a hybrid
+        of semantic and lexical similarity. Otherwise it is pure TF-IDF, where
+        chunks below ``MIN_SCORE`` are dropped so an off-topic question yields an
+        empty list — the signal the answer layer uses to refuse.
         """
         if self.is_empty() or not query.strip():
             return []
         query_vec = self._vectorize(query)
-        scored = (
-            (chunk, cosine(query_vec, vec))
-            for chunk, vec in zip(self._chunks, self._vectors, strict=False)
-        )
+        if query_embedding is not None and self.has_embeddings():
+            scored = self._hybrid_scores(query_vec, query_embedding)
+            floor = SEM_MIN
+        else:
+            scored = [
+                (chunk, cosine(query_vec, vec))
+                for chunk, vec in zip(self._chunks, self._vectors, strict=False)
+            ]
+            floor = MIN_SCORE
         ranked = sorted(scored, key=lambda pair: pair[1], reverse=True)
         results: list[Retrieved] = []
         for chunk, score in ranked[:top_k]:
-            if score < MIN_SCORE:
+            if score < floor:
                 break
             results.append(Retrieved(chunk=chunk, score=score, rank=len(results) + 1))
         return results
+
+    def _hybrid_scores(
+        self, query_vec: dict[str, float], query_embedding: list[float]
+    ) -> list[tuple[Chunk, float]]:
+        """Blend semantic and lexical similarity for every chunk."""
+        scored: list[tuple[Chunk, float]] = []
+        for chunk, vec in zip(self._chunks, self._vectors, strict=False):
+            lex = cosine(query_vec, vec)
+            sem = cosine_dense(query_embedding, self._embeddings[chunk.id])
+            scored.append((chunk, SEM_WEIGHT * sem + (1.0 - SEM_WEIGHT) * lex))
+        return scored

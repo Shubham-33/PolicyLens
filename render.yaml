@@ -8,10 +8,15 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+    # Single worker + threads: the per-session corpus store lives in process
+    # memory, so all of a user's requests must share one process. Threads give
+    # concurrency for the I/O-bound model calls.
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --worker-class gthread --timeout 60
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: "3.12"
       - key: NIM_API_KEY
         sync: false
+      - key: SECRET_KEY
+        generateValue: true

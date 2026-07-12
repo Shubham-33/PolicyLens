@@ -1,19 +1,25 @@
 """PolicyLens — a retrieval-grounded policy & FAQ assistant.
 
-Upload a policy document, ask questions, and get answers grounded in that
-document with clickable citations that point back to the exact source passage.
+Upload one or more policy documents, ask questions, and get answers grounded in
+those documents with clickable citations that point back to the exact source
+passage. Each browser session has its own private corpus, so concurrent users
+never see each other's documents.
 
 Layers:
-  * ``rag.py``    — TF-IDF retrieval (pure Python, deterministic)
+  * ``rag.py``    — TF-IDF + hybrid semantic retrieval (deterministic core)
+  * ``embed.py``  — NVIDIA embeddings for semantic recall, with a no-op fallback
   * ``nim.py``    — NVIDIA NIM grounded generation, with an offline fallback
   * ``ingest.py`` — file -> page-text extraction
-  * this module   — Flask routes, middleware, and in-memory state
+  * this module   — Flask routes, per-session state, and middleware
 """
 
 from __future__ import annotations
 
 import gzip
 import mimetypes
+import os
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Final
@@ -26,11 +32,13 @@ from flask import (
     make_response,
     render_template,
     request,
+    session,
 )
 
+import embed
 import nim
 from ingest import EmptyDocumentError, UnsupportedFileError, extract_pages
-from rag import DEFAULT_TOP_K, TfidfIndex
+from rag import DEFAULT_TOP_K, RetrievalIndex
 from sample_data import SAMPLE_DOC_NAME, SAMPLE_POLICY
 
 load_dotenv()
@@ -50,6 +58,8 @@ MAX_QUESTION_CHARS: Final[int] = 500
 GZIP_MIN_BYTES: Final[int] = 500
 INDEX_CACHE_SECONDS: Final[int] = 300
 STATIC_CACHE_SECONDS: Final[int] = 60 * 60 * 24
+MAX_SESSIONS: Final[int] = 200  # cap in-memory corpora; evict least-recently-used
+SAMPLE_DOC_ID: Final[str] = "sample"
 BUILD_ID: Final[str] = str(int(Path(__file__).stat().st_mtime))
 
 _FAVICON: Final[str] = (
@@ -58,6 +68,35 @@ _FAVICON: Final[str] = (
     '<text x="16" y="22" font-size="18" text-anchor="middle" fill="#fff" '
     'font-family="Georgia,serif">P</text></svg>'
 )
+
+# ---------------------------------------------------------------------------
+# Per-session corpus store
+# ---------------------------------------------------------------------------
+
+_SESSIONS: dict[str, RetrievalIndex] = {}
+_SESSION_TS: dict[str, float] = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def _session_index() -> RetrievalIndex:
+    """Return the index for the current browser session, creating one if needed."""
+    sid = session.get("sid")
+    with _SESSIONS_LOCK:
+        if not sid or sid not in _SESSIONS:
+            sid = uuid.uuid4().hex
+            session["sid"] = sid
+            _SESSIONS[sid] = RetrievalIndex()
+            _evict_locked()
+        _SESSION_TS[sid] = time.time()
+        return _SESSIONS[sid]
+
+
+def _evict_locked() -> None:
+    """Drop least-recently-used sessions once over the cap (lock held by caller)."""
+    while len(_SESSIONS) > MAX_SESSIONS:
+        oldest = min(_SESSION_TS, key=lambda s: _SESSION_TS.get(s, 0.0))
+        _SESSIONS.pop(oldest, None)
+        _SESSION_TS.pop(oldest, None)
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +110,7 @@ def create_app() -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = STATIC_CACHE_SECONDS
     app.config["JSON_SORT_KEYS"] = False
-
-    index = TfidfIndex()
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "policylens-dev-secret")
 
     # -- Routes -------------------------------------------------------------
 
@@ -102,62 +140,76 @@ def create_app() -> Flask:
 
     @app.route("/api/status")
     def status() -> Response:
-        """Report what is loaded and whether live generation is available."""
+        """Report the current session's documents and available capabilities."""
+        index = _session_index()
         return jsonify(
             {
-                "documents": index.doc_names,
+                "documents": index.documents,
                 "chunks": len(index.chunks),
+                "semantic": index.has_embeddings(),
                 "llm_configured": nim.is_configured(),
+                "embeddings_available": embed.is_configured(),
             }
         )
 
     @app.route("/api/sample", methods=["POST"])
     def load_sample() -> Response:
-        """Reset the index and load the bundled sample policy document."""
-        index.clear()
-        count = index.add_document(
-            doc_id=_new_doc_id(), doc_name=SAMPLE_DOC_NAME, pages=[SAMPLE_POLICY]
-        )
-        return jsonify({"name": SAMPLE_DOC_NAME, "chunks": count})
+        """Add the bundled sample policy to this session (idempotent)."""
+        index = _session_index()
+        if not any(d["doc_id"] == SAMPLE_DOC_ID for d in index.documents):
+            _index_document(index, SAMPLE_DOC_ID, SAMPLE_DOC_NAME, [SAMPLE_POLICY])
+        return _corpus_response(index)
 
     @app.route("/api/ingest", methods=["POST"])
     def ingest() -> tuple[Response, int] | Response:
-        """Index an uploaded file or pasted text, replacing the current corpus."""
+        """Index an uploaded file or pasted text, adding to this session's corpus."""
         try:
             name, pages = _read_ingest_request()
-        except (UnsupportedFileError, EmptyDocumentError) as exc:
+        except (UnsupportedFileError, EmptyDocumentError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        index.clear()
-        count = index.add_document(doc_id=_new_doc_id(), doc_name=name, pages=pages)
-        return jsonify({"name": name, "chunks": count})
+        index = _session_index()
+        _index_document(index, uuid.uuid4().hex[:8], name, pages)
+        return _corpus_response(index)
+
+    @app.route("/api/remove", methods=["POST"])
+    def remove() -> tuple[Response, int] | Response:
+        """Remove one document from this session by id."""
+        index = _session_index()
+        doc_id = str((request.get_json(silent=True) or {}).get("doc_id", ""))
+        if not index.remove_document(doc_id):
+            return jsonify({"error": "Document not found."}), 404
+        return _corpus_response(index)
 
     @app.route("/api/ask", methods=["POST"])
     def ask() -> tuple[Response, int] | Response:
-        """Answer a question against the indexed corpus, with citations."""
+        """Answer a question against this session's corpus, with citations."""
         payload = request.get_json(silent=True) or {}
         question = str(payload.get("question", "")).strip()
         if not question:
             return jsonify({"error": "Ask a question first."}), 400
         if len(question) > MAX_QUESTION_CHARS:
             return jsonify({"error": "Question is too long."}), 400
+        index = _session_index()
         if index.is_empty():
             return jsonify({"error": "Load or upload a document first."}), 400
 
-        retrieved = index.search(question, top_k=DEFAULT_TOP_K)
+        query_embedding = embed.embed_query(question) if index.has_embeddings() else None
+        retrieved = index.search(
+            question, top_k=DEFAULT_TOP_K, query_embedding=query_embedding
+        )
         result = nim.answer_question(question, retrieved)
         return jsonify(
             {
                 **result.to_dict(),
+                "semantic": query_embedding is not None,
                 "sources": [_source_dict(item) for item in retrieved],
             }
         )
 
     @app.route("/api/reset", methods=["POST"])
     def reset() -> Response:
-        """Clear the entire corpus."""
-        index.clear()
+        """Clear this session's entire corpus."""
+        _session_index().clear()
         return jsonify({"ok": True})
 
     # -- Middleware ---------------------------------------------------------
@@ -194,13 +246,29 @@ def create_app() -> Flask:
 
 
 # ---------------------------------------------------------------------------
-# Request helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def _new_doc_id() -> str:
-    """A short unique id for a freshly ingested document."""
-    return uuid.uuid4().hex[:8]
+def _index_document(
+    index: RetrievalIndex, doc_id: str, name: str, pages: list[str]
+) -> None:
+    """Chunk, index, and (when possible) semantically embed a document."""
+    chunks = index.add_document(doc_id, name, pages)
+    vectors = embed.embed_passages([c.text for c in chunks])
+    if vectors:
+        index.set_embeddings({c.id: v for c, v in zip(chunks, vectors, strict=False)})
+
+
+def _corpus_response(index: RetrievalIndex) -> Response:
+    """Standard payload describing the session's current corpus."""
+    return jsonify(
+        {
+            "documents": index.documents,
+            "chunks": len(index.chunks),
+            "semantic": index.has_embeddings(),
+        }
+    )
 
 
 def _read_ingest_request() -> tuple[str, list[str]]:
@@ -233,7 +301,5 @@ app = create_app()
 
 
 if __name__ == "__main__":  # pragma: no cover
-    import os
-
     port = int(os.environ.get("PORT", 5050))
     app.run(host="0.0.0.0", port=port, debug=False)

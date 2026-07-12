@@ -1,7 +1,8 @@
 /* PolicyLens front-end.
  *
- * Three jobs: load a document, ask a question, and wire the clickable [n]
- * citations in the answer to the matching source card (the NotebookLM move).
+ * Jobs: manage a multi-document corpus (load/upload/remove), ask questions, and
+ * wire the clickable [n] citations in the answer to the matching source card
+ * (the NotebookLM move).
  */
 (() => {
   "use strict";
@@ -14,6 +15,9 @@
     sampleBtn: $("sample-btn"),
     fileInput: $("file-input"),
     docStatus: $("doc-status"),
+    docTray: $("doc-tray"),
+    docList: $("doc-list"),
+    clearBtn: $("clear-btn"),
     askForm: $("ask-form"),
     question: $("question"),
     askBtn: $("ask-btn"),
@@ -42,7 +46,7 @@
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body || {}),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Request failed");
@@ -53,18 +57,43 @@
     els.docStatus.textContent = text;
   }
 
-  // --- document loading ----------------------------------------------------
+  // --- corpus rendering ----------------------------------------------------
 
-  function onDocumentLoaded(data) {
-    hasDocument = true;
-    setDocStatus(`Loaded “${data.name}” · ${data.chunks} passages indexed`);
-    els.question.focus();
+  function renderCorpus(data) {
+    const docs = data.documents || [];
+    hasDocument = docs.length > 0;
+    els.docTray.classList.toggle("hidden", !hasDocument);
+    els.docTray.classList.toggle("flex", hasDocument);
+
+    els.docList.innerHTML = docs
+      .map(
+        (d) => `
+        <li class="inline-flex items-center gap-1.5 rounded-full bg-brand-light px-3 py-1 text-xs font-medium text-brand-dark">
+          <span class="max-w-[16rem] truncate">${escapeHtml(d.name)}</span>
+          <span class="text-brand/70">· ${d.chunks}</span>
+          <button type="button" class="doc-remove ml-0.5 rounded-full px-1 leading-none hover:bg-brand hover:text-white focus:outline-none focus:ring-1 focus:ring-brand" data-doc-id="${escapeHtml(
+            d.doc_id,
+          )}" aria-label="Remove ${escapeHtml(d.name)}">×</button>
+        </li>`,
+      )
+      .join("");
+
+    if (hasDocument) {
+      const total = docs.reduce((n, d) => n + d.chunks, 0);
+      const mode = data.semantic ? "semantic + keyword" : "keyword";
+      setDocStatus(
+        `${docs.length} document${docs.length > 1 ? "s" : ""} · ${total} passages · ${mode} search`,
+      );
+      els.question.focus();
+    } else {
+      setDocStatus("");
+    }
   }
 
   async function loadSample() {
     setDocStatus("Loading sample…");
     try {
-      onDocumentLoaded(await postJSON("/api/sample", {}));
+      renderCorpus(await postJSON("/api/sample"));
     } catch (err) {
       setDocStatus(err.message);
     }
@@ -78,7 +107,27 @@
       const res = await fetch("/api/ingest", { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Upload failed");
-      onDocumentLoaded(data);
+      renderCorpus(data);
+    } catch (err) {
+      setDocStatus(err.message);
+    }
+  }
+
+  async function removeDoc(docId) {
+    try {
+      renderCorpus(await postJSON("/api/remove", { doc_id: docId }));
+    } catch (err) {
+      setDocStatus(err.message);
+    }
+  }
+
+  async function clearAll() {
+    try {
+      await postJSON("/api/reset");
+      renderCorpus({ documents: [] });
+      els.answerPanel.innerHTML =
+        '<p class="text-sm text-slate-600">Your grounded answer will appear here.</p>';
+      els.sourcesList.innerHTML = "";
     } catch (err) {
       setDocStatus(err.message);
     }
@@ -137,23 +186,24 @@
     if (!card) return;
     card.classList.add("active", "flash");
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    card.addEventListener(
-      "animationend",
-      () => card.classList.remove("flash"),
-      { once: true },
-    );
+    card.addEventListener("animationend", () => card.classList.remove("flash"), {
+      once: true,
+    });
   }
 
   function renderAnswer(data) {
-    const grounded = data.grounded
-      ? '<span class="text-brand">grounded answer</span>'
+    const mode = data.grounded
+      ? `<span class="text-brand">grounded answer</span>`
       : '<span class="text-slate-600">offline extract</span>';
+    const sem = data.semantic
+      ? ' · <span class="text-brand">semantic</span>'
+      : "";
     const body = data.found
       ? linkifyCitations(data.answer)
       : `<span class="text-slate-600">${escapeHtml(data.answer)}</span>`;
     els.answerPanel.innerHTML = `
       <p class="text-[0.95rem] leading-relaxed">${body}</p>
-      <p class="mt-3 text-xs text-slate-600">${grounded}${
+      <p class="mt-3 text-xs text-slate-600">${mode}${sem}${
         data.model ? " · " + escapeHtml(data.model) : ""
       }</p>`;
     renderSources(data.sources || []);
@@ -177,8 +227,7 @@
 
   async function refreshStatus() {
     try {
-      const res = await fetch("/api/status");
-      const data = await res.json();
+      const data = await (await fetch("/api/status")).json();
       if (data.llm_configured) {
         els.llmBadge.textContent = "NVIDIA NIM · live";
         els.llmBadge.className =
@@ -188,6 +237,7 @@
         els.llmBadge.className =
           "rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700";
       }
+      renderCorpus(data); // restore any docs already in this session
     } catch {
       els.llmBadge.textContent = "offline mode";
     }
@@ -197,8 +247,15 @@
 
   els.sampleBtn.addEventListener("click", loadSample);
   els.browseBtn.addEventListener("click", () => els.fileInput.click());
+  els.clearBtn.addEventListener("click", clearAll);
   els.fileInput.addEventListener("change", (e) => {
     if (e.target.files[0]) uploadFile(e.target.files[0]);
+    e.target.value = "";
+  });
+
+  els.docList.addEventListener("click", (e) => {
+    const btn = e.target.closest(".doc-remove");
+    if (btn) removeDoc(btn.dataset.docId);
   });
 
   ["dragover", "dragenter"].forEach((evt) =>
