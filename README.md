@@ -26,7 +26,7 @@ PolicyLens uses **Retrieval-Augmented Generation (RAG)**:
 
 1. **Ingest** — the document is split into overlapping passages.
 2. **Retrieve** — a TF-IDF index finds the passages most relevant to the question.
-3. **Generate** — NVIDIA NIM (`llama-3.3-70b-instruct`) answers using *only* those
+3. **Generate** — NVIDIA NIM (`llama-3.1-8b-instruct`) answers using *only* those
    passages and cites each one; the UI links every `[n]` marker to its source.
 
 Why not fine-tune a model on the FAQ? Fine-tuning bakes facts into weights you
@@ -90,7 +90,7 @@ See [`deploy.sh`](deploy.sh) for a one-shot Google Cloud Run deploy.
 
 ## Tech
 
-Flask · vanilla JS · Tailwind (CDN) · NVIDIA NIM (`llama-3.3-70b-instruct`) ·
+Flask · vanilla JS · Tailwind (CDN) · NVIDIA NIM (`llama-3.1-8b-instruct`) ·
 pure-Python TF-IDF · pytest + coverage · ruff.
 
 ## Note

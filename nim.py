@@ -25,7 +25,9 @@ from rag import Retrieved, tokenize
 # ---------------------------------------------------------------------------
 
 NIM_URL: Final[str] = "https://integrate.api.nvidia.com/v1/chat/completions"
-NIM_MODEL: Final[str] = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
+# 8B is fast and reliable on NVIDIA's free tier; since answers are grounded in
+# retrieved context, it is more than adequate here. Override via NIM_MODEL.
+NIM_MODEL: Final[str] = os.environ.get("NIM_MODEL", "meta/llama-3.1-8b-instruct")
 REQUEST_TIMEOUT_S: Final[int] = 30
 MAX_ANSWER_SENTENCES: Final[int] = 3
 
@@ -169,12 +171,25 @@ def _parse_answer(content: str, retrieved: list[Retrieved]) -> AnswerResult | No
         if isinstance(c, int | float) and int(c) in valid_ranks
     ]
     return AnswerResult(
-        answer=answer,
+        answer=_ensure_inline_markers(answer, citations),
         citations=citations,
         found=found,
         grounded=True,
         model=NIM_MODEL,
     )
+
+
+def _ensure_inline_markers(answer: str, citations: list[int]) -> str:
+    """Guarantee cited passages appear as clickable [n] markers in the answer.
+
+    Smaller models sometimes return citations in the JSON array but forget to
+    embed the markers in the prose. Without an inline [n] the UI has nothing to
+    make clickable, so we append any missing markers to the end of the answer.
+    """
+    if not citations or any(f"[{c}]" in answer for c in citations):
+        return answer
+    markers = "".join(f"[{c}]" for c in citations)
+    return f"{answer.rstrip()} {markers}"
 
 
 # ---------------------------------------------------------------------------

@@ -160,6 +160,14 @@ def test_parse_answer_defaults_found_from_answer():
     assert result is not None and result.found is True and result.citations == []
 
 
+def test_parse_answer_appends_missing_inline_markers():
+    # Model returned citations but no inline [n] -> markers are appended.
+    content = '{"answer": "Minimum balance is Rs. 10000.", "citations": [1, 2], "found": true}'
+    result = nim._parse_answer(content, _retrieved())
+    assert result is not None
+    assert result.answer.endswith("[1][2]") and result.citations == [1, 2]
+
+
 # -- extractive fallback ----------------------------------------------------
 
 
