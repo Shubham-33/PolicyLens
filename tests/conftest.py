@@ -30,6 +30,14 @@ def _clean_llm_env(monkeypatch):
     monkeypatch.delenv("API_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_sessions(tmp_path, monkeypatch):
+    """Point the disk-backed session store at a per-test temp dir."""
+    import session_store
+
+    monkeypatch.setattr(session_store, "SESSION_DIR", tmp_path / "sessions")
+
+
 @pytest.fixture
 def app():
     """A freshly built Flask app with an empty index."""

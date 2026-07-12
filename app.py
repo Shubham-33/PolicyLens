@@ -18,8 +18,6 @@ from __future__ import annotations
 import gzip
 import mimetypes
 import os
-import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Final
@@ -37,6 +35,7 @@ from flask import (
 
 import embed
 import nim
+import session_store
 from ingest import EmptyDocumentError, UnsupportedFileError, extract_pages
 from rag import DEFAULT_TOP_K, RetrievalIndex
 from sample_data import SAMPLE_DOC_NAME, SAMPLE_POLICY
@@ -58,7 +57,6 @@ MAX_QUESTION_CHARS: Final[int] = 500
 GZIP_MIN_BYTES: Final[int] = 500
 INDEX_CACHE_SECONDS: Final[int] = 300
 STATIC_CACHE_SECONDS: Final[int] = 60 * 60 * 24
-MAX_SESSIONS: Final[int] = 200  # cap in-memory corpora; evict least-recently-used
 SAMPLE_DOC_ID: Final[str] = "sample"
 BUILD_ID: Final[str] = str(int(Path(__file__).stat().st_mtime))
 
@@ -70,33 +68,17 @@ _FAVICON: Final[str] = (
 )
 
 # ---------------------------------------------------------------------------
-# Per-session corpus store
+# Per-session corpus (disk-backed; see session_store)
 # ---------------------------------------------------------------------------
 
-_SESSIONS: dict[str, RetrievalIndex] = {}
-_SESSION_TS: dict[str, float] = {}
-_SESSIONS_LOCK = threading.Lock()
 
-
-def _session_index() -> RetrievalIndex:
-    """Return the index for the current browser session, creating one if needed."""
+def _current_sid() -> str:
+    """Return this browser's session id, minting one on first visit."""
     sid = session.get("sid")
-    with _SESSIONS_LOCK:
-        if not sid or sid not in _SESSIONS:
-            sid = uuid.uuid4().hex
-            session["sid"] = sid
-            _SESSIONS[sid] = RetrievalIndex()
-            _evict_locked()
-        _SESSION_TS[sid] = time.time()
-        return _SESSIONS[sid]
-
-
-def _evict_locked() -> None:
-    """Drop least-recently-used sessions once over the cap (lock held by caller)."""
-    while len(_SESSIONS) > MAX_SESSIONS:
-        oldest = min(_SESSION_TS, key=lambda s: _SESSION_TS.get(s, 0.0))
-        _SESSIONS.pop(oldest, None)
-        _SESSION_TS.pop(oldest, None)
+    if not sid:
+        sid = uuid.uuid4().hex
+        session["sid"] = sid
+    return sid
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +123,7 @@ def create_app() -> Flask:
     @app.route("/api/status")
     def status() -> Response:
         """Report the current session's documents and available capabilities."""
-        index = _session_index()
+        index = session_store.load(_current_sid())
         return jsonify(
             {
                 "documents": index.documents,
@@ -155,9 +137,11 @@ def create_app() -> Flask:
     @app.route("/api/sample", methods=["POST"])
     def load_sample() -> Response:
         """Add the bundled sample policy to this session (idempotent)."""
-        index = _session_index()
+        sid = _current_sid()
+        index = session_store.load(sid)
         if not any(d["doc_id"] == SAMPLE_DOC_ID for d in index.documents):
             _index_document(index, SAMPLE_DOC_ID, SAMPLE_DOC_NAME, [SAMPLE_POLICY])
+            session_store.save(sid, index)
         return _corpus_response(index)
 
     @app.route("/api/ingest", methods=["POST"])
@@ -167,17 +151,21 @@ def create_app() -> Flask:
             name, pages = _read_ingest_request()
         except (UnsupportedFileError, EmptyDocumentError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
-        index = _session_index()
+        sid = _current_sid()
+        index = session_store.load(sid)
         _index_document(index, uuid.uuid4().hex[:8], name, pages)
+        session_store.save(sid, index)
         return _corpus_response(index)
 
     @app.route("/api/remove", methods=["POST"])
     def remove() -> tuple[Response, int] | Response:
         """Remove one document from this session by id."""
-        index = _session_index()
+        sid = _current_sid()
+        index = session_store.load(sid)
         doc_id = str((request.get_json(silent=True) or {}).get("doc_id", ""))
         if not index.remove_document(doc_id):
             return jsonify({"error": "Document not found."}), 404
+        session_store.save(sid, index)
         return _corpus_response(index)
 
     @app.route("/api/ask", methods=["POST"])
@@ -189,7 +177,7 @@ def create_app() -> Flask:
             return jsonify({"error": "Ask a question first."}), 400
         if len(question) > MAX_QUESTION_CHARS:
             return jsonify({"error": "Question is too long."}), 400
-        index = _session_index()
+        index = session_store.load(_current_sid())
         if index.is_empty():
             return jsonify({"error": "Load or upload a document first."}), 400
 
@@ -209,7 +197,7 @@ def create_app() -> Flask:
     @app.route("/api/reset", methods=["POST"])
     def reset() -> Response:
         """Clear this session's entire corpus."""
-        _session_index().clear()
+        session_store.save(_current_sid(), RetrievalIndex())
         return jsonify({"ok": True})
 
     # -- Middleware ---------------------------------------------------------

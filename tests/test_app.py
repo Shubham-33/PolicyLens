@@ -152,17 +152,12 @@ def test_sessions_are_isolated(app):
     assert b.get("/api/status").get_json()["documents"] == []
 
 
-def test_evict_locked_drops_oldest(monkeypatch):
-    monkeypatch.setattr(app_module, "MAX_SESSIONS", 2)
-    app_module._SESSIONS.clear()
-    app_module._SESSION_TS.clear()
-    for i, sid in enumerate(["s1", "s2", "s3"]):
-        app_module._SESSIONS[sid] = app_module.RetrievalIndex()
-        app_module._SESSION_TS[sid] = float(i)  # s1 oldest
-    app_module._evict_locked()
-    assert set(app_module._SESSIONS) == {"s2", "s3"}
-    app_module._SESSIONS.clear()
-    app_module._SESSION_TS.clear()
+def test_corpus_persists_across_requests(client):
+    # Load once, then several asks on the same session all still see the doc.
+    client.post("/api/sample")
+    for _ in range(3):
+        resp = client.post("/api/ask", json={"question": "minimum balance?"})
+        assert resp.status_code == 200 and resp.get_json()["found"] is True
 
 
 # -- middleware -------------------------------------------------------------
