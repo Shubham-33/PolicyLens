@@ -8,7 +8,7 @@ instead of guessing.
 
 Built for the IDBI / Hack2Skill hackathon.
 
-[![CI](https://github.com/Shubham-33/web/actions/workflows/ci.yml/badge.svg)](https://github.com/Shubham-33/web/actions/workflows/ci.yml)
+[![CI](https://github.com/Shubham-33/PolicyLens/actions/workflows/ci.yml/badge.svg)](https://github.com/Shubham-33/PolicyLens/actions/workflows/ci.yml)
 ![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 
 ---
