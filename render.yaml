@@ -1,0 +1,17 @@
+# Render blueprint — deploy PolicyLens with no credit card.
+# 1. Push this repo to GitHub.
+# 2. On https://dashboard.render.com → New → Blueprint → pick the repo.
+# 3. Add the NIM_API_KEY value when prompted (marked sync:false below).
+services:
+  - type: web
+    name: policylens
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: NIM_API_KEY
+        sync: false
