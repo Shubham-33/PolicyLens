@@ -13,6 +13,7 @@ Layers:
 from __future__ import annotations
 
 import gzip
+import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any, Final
@@ -33,6 +34,12 @@ from rag import DEFAULT_TOP_K, TfidfIndex
 from sample_data import SAMPLE_DOC_NAME, SAMPLE_POLICY
 
 load_dotenv()
+
+# Some minimal Linux images (e.g. the Render build image) map .js/.css to
+# text/plain, which makes browsers refuse to execute the served script. Pin the
+# correct types so the front-end runs everywhere, not just on macOS.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 # ---------------------------------------------------------------------------
 # Config

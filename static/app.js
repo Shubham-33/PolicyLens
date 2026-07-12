@@ -109,7 +109,7 @@
   function renderSources(sources) {
     if (!sources.length) {
       els.sourcesList.innerHTML =
-        '<li class="text-slate-400">No matching passages.</li>';
+        '<li class="text-slate-600">No matching passages.</li>';
       return;
     }
     els.sourcesList.innerHTML = sources
@@ -147,13 +147,13 @@
   function renderAnswer(data) {
     const grounded = data.grounded
       ? '<span class="text-brand">grounded answer</span>'
-      : '<span class="text-slate-400">offline extract</span>';
+      : '<span class="text-slate-600">offline extract</span>';
     const body = data.found
       ? linkifyCitations(data.answer)
       : `<span class="text-slate-600">${escapeHtml(data.answer)}</span>`;
     els.answerPanel.innerHTML = `
       <p class="text-[0.95rem] leading-relaxed">${body}</p>
-      <p class="mt-3 text-xs text-slate-400">${grounded}${
+      <p class="mt-3 text-xs text-slate-600">${grounded}${
         data.model ? " · " + escapeHtml(data.model) : ""
       }</p>`;
     renderSources(data.sources || []);
