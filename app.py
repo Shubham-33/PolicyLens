@@ -58,7 +58,21 @@ GZIP_MIN_BYTES: Final[int] = 500
 INDEX_CACHE_SECONDS: Final[int] = 300
 STATIC_CACHE_SECONDS: Final[int] = 60 * 60 * 24
 SAMPLE_DOC_ID: Final[str] = "sample"
-BUILD_ID: Final[str] = str(int(Path(__file__).stat().st_mtime))
+_HERE: Final[Path] = Path(__file__).parent
+_CACHE_ASSETS: Final[tuple[str, ...]] = (
+    "static/app.js",
+    "static/app.css",
+    "templates/index.html",
+)
+# Bust the browser cache whenever any front-end asset changes, not just app.py.
+BUILD_ID: Final[str] = str(
+    int(
+        max(
+            Path(__file__).stat().st_mtime,
+            *((_HERE / a).stat().st_mtime for a in _CACHE_ASSETS),
+        )
+    )
+)
 
 _FAVICON: Final[str] = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'

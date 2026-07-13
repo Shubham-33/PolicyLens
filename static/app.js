@@ -57,6 +57,22 @@
     els.docStatus.textContent = text;
   }
 
+  // Show a spinner + message while a document is being processed, and disable
+  // the load controls so a second action can't race the first.
+  function setLoading(message) {
+    els.docStatus.innerHTML =
+      '<span class="spinner" aria-hidden="true"></span>' + escapeHtml(message);
+    [els.sampleBtn, els.browseBtn, els.clearBtn].forEach((b) => {
+      if (b) b.disabled = true;
+    });
+  }
+
+  function clearLoading() {
+    [els.sampleBtn, els.browseBtn, els.clearBtn].forEach((b) => {
+      if (b) b.disabled = false;
+    });
+  }
+
   // --- corpus rendering ----------------------------------------------------
 
   function renderCorpus(data) {
@@ -91,16 +107,18 @@
   }
 
   async function loadSample() {
-    setDocStatus("Loading sample…");
+    setLoading("Loading sample…");
     try {
       renderCorpus(await postJSON("/api/sample"));
     } catch (err) {
       setDocStatus(err.message);
+    } finally {
+      clearLoading();
     }
   }
 
   async function uploadFile(file) {
-    setDocStatus(`Reading “${file.name}”…`);
+    setLoading(`Reading & indexing “${file.name}”…`);
     const form = new FormData();
     form.append("file", file);
     try {
@@ -110,6 +128,8 @@
       renderCorpus(data);
     } catch (err) {
       setDocStatus(err.message);
+    } finally {
+      clearLoading();
     }
   }
 
@@ -228,7 +248,10 @@
 
   async function ask(question) {
     renderSkeleton();
+    const label = els.askBtn.textContent;
     els.askBtn.disabled = true;
+    els.askBtn.innerHTML =
+      '<span class="spinner spinner-light" aria-hidden="true"></span>Asking…';
     try {
       renderAnswer(await postJSON("/api/ask", { question }));
     } catch (err) {
@@ -237,6 +260,7 @@
       )}</p>`;
     } finally {
       els.askBtn.disabled = false;
+      els.askBtn.textContent = label;
     }
   }
 
