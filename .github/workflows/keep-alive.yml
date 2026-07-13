@@ -1,0 +1,20 @@
+name: keep-alive
+
+# Ping the live site every ~10 minutes so Render's free tier (which sleeps after
+# ~15 min idle) stays awake — no cold start when a judge opens the URL.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {} # allow a manual run from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm the app
+        run: |
+          for path in /healthz /; do
+            echo "Pinging $path"
+            curl -fsS --max-time 90 "https://policylens-z71r.onrender.com$path" -o /dev/null \
+              && echo "  ok" || echo "  ping failed (site may be waking up)"
+          done
