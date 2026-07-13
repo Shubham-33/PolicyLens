@@ -37,7 +37,7 @@ import embed
 import nim
 import session_store
 from ingest import EmptyDocumentError, UnsupportedFileError, extract_pages
-from rag import DEFAULT_TOP_K, RetrievalIndex
+from rag import DEFAULT_TOP_K, RetrievalIndex, best_sentence
 from sample_data import SAMPLE_DOC_NAME, SAMPLE_POLICY
 
 load_dotenv()
@@ -138,10 +138,11 @@ def create_app() -> Flask:
     def load_sample() -> Response:
         """Add the bundled sample policy to this session (idempotent)."""
         sid = _current_sid()
-        index = session_store.load(sid)
-        if not any(d["doc_id"] == SAMPLE_DOC_ID for d in index.documents):
-            _index_document(index, SAMPLE_DOC_ID, SAMPLE_DOC_NAME, [SAMPLE_POLICY])
-            session_store.save(sid, index)
+        with session_store.locked(sid):
+            index = session_store.load(sid)
+            if not any(d["doc_id"] == SAMPLE_DOC_ID for d in index.documents):
+                _index_document(index, SAMPLE_DOC_ID, SAMPLE_DOC_NAME, [SAMPLE_POLICY])
+                session_store.save(sid, index)
         return _corpus_response(index)
 
     @app.route("/api/ingest", methods=["POST"])
@@ -152,20 +153,22 @@ def create_app() -> Flask:
         except (UnsupportedFileError, EmptyDocumentError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
         sid = _current_sid()
-        index = session_store.load(sid)
-        _index_document(index, uuid.uuid4().hex[:8], name, pages)
-        session_store.save(sid, index)
+        with session_store.locked(sid):
+            index = session_store.load(sid)
+            _index_document(index, uuid.uuid4().hex[:8], name, pages)
+            session_store.save(sid, index)
         return _corpus_response(index)
 
     @app.route("/api/remove", methods=["POST"])
     def remove() -> tuple[Response, int] | Response:
         """Remove one document from this session by id."""
         sid = _current_sid()
-        index = session_store.load(sid)
-        doc_id = str((request.get_json(silent=True) or {}).get("doc_id", ""))
-        if not index.remove_document(doc_id):
-            return jsonify({"error": "Document not found."}), 404
-        session_store.save(sid, index)
+        with session_store.locked(sid):
+            index = session_store.load(sid)
+            doc_id = str((request.get_json(silent=True) or {}).get("doc_id", ""))
+            if not index.remove_document(doc_id):
+                return jsonify({"error": "Document not found."}), 404
+            session_store.save(sid, index)
         return _corpus_response(index)
 
     @app.route("/api/ask", methods=["POST"])
@@ -190,7 +193,7 @@ def create_app() -> Flask:
             {
                 **result.to_dict(),
                 "semantic": query_embedding is not None,
-                "sources": [_source_dict(item) for item in retrieved],
+                "sources": [_source_dict(item, question) for item in retrieved],
             }
         )
 
@@ -274,13 +277,18 @@ def _read_ingest_request() -> tuple[str, list[str]]:
     return name, [text]
 
 
-def _source_dict(item: Any) -> dict[str, Any]:
-    """Serialise a retrieved chunk for the sources panel."""
+def _source_dict(item: Any, question: str) -> dict[str, Any]:
+    """Serialise a retrieved chunk for the sources panel.
+
+    ``highlight`` is the sentence in the passage most relevant to the question,
+    so the UI can mark exactly which part the answer was drawn from.
+    """
     return {
         "rank": item.rank,
         "doc_name": item.chunk.doc_name,
         "page": item.chunk.page,
         "text": item.chunk.text,
+        "highlight": best_sentence(question, item.chunk.text),
         "score": round(item.score, 4),
     }
 

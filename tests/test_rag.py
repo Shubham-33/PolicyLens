@@ -5,6 +5,7 @@ import pytest
 from rag import (
     MIN_SCORE,
     RetrievalIndex,
+    best_sentence,
     chunk_text,
     cosine,
     cosine_dense,
@@ -27,6 +28,22 @@ def test_tokenize_lowercases_and_drops_stopwords():
 
 def test_tokenize_empty():
     assert tokenize("the and of") == []
+
+
+# -- best_sentence ----------------------------------------------------------
+
+
+def test_best_sentence_picks_overlapping():
+    text = "Interest is paid quarterly. The minimum balance is Rs. 10000."
+    assert "minimum balance" in best_sentence("what is the minimum balance?", text).lower()
+
+
+def test_best_sentence_no_overlap_returns_empty():
+    assert best_sentence("photosynthesis", "Minimum balance is Rs. 10000.") == ""
+
+
+def test_best_sentence_all_stopword_query_returns_empty():
+    assert best_sentence("the and of", "Minimum balance rules apply.") == ""
 
 
 # -- chunk_text -------------------------------------------------------------

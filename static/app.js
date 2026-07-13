@@ -155,6 +155,23 @@
     );
   }
 
+  // Wrap the relevant sentence within a passage in a <mark> so the reader sees
+  // exactly which part the answer came from.
+  function markHighlight(text, highlight) {
+    const escaped = escapeHtml(text);
+    if (!highlight) return escaped;
+    const escHi = escapeHtml(highlight);
+    const at = escaped.indexOf(escHi);
+    if (at === -1) return escaped;
+    return (
+      escaped.slice(0, at) +
+      '<mark class="src-hl">' +
+      escHi +
+      "</mark>" +
+      escaped.slice(at + escHi.length)
+    );
+  }
+
   function renderSources(sources) {
     if (!sources.length) {
       els.sourcesList.innerHTML =
@@ -172,7 +189,7 @@
               s.doc_name,
             )}${loc}</span>
           </div>
-          <p class="text-slate-700">${escapeHtml(s.text)}</p>
+          <p class="text-slate-700">${markHighlight(s.text, s.highlight)}</p>
         </li>`;
       })
       .join("");

@@ -28,6 +28,7 @@ SEM_MIN: Final[float] = 0.08  # hybrid floor when embeddings are in play
 
 _TOKEN_RE: Final = re.compile(r"[a-z0-9]+")
 _PARA_RE: Final = re.compile(r"\n\s*\n")
+_SENTENCE_RE: Final = re.compile(r"(?<=[.!?])\s+")
 
 # Dropping these keeps short questions from matching on filler words alone
 # (e.g. "what is the weather on Mars" should not hit a chunk just for "on").
@@ -74,6 +75,25 @@ class Retrieved:
 def tokenize(text: str) -> list[str]:
     """Lowercase word/number tokens minus stopwords; used everywhere."""
     return [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS]
+
+
+def best_sentence(query: str, text: str) -> str:
+    """Return the sentence in ``text`` most relevant to ``query``.
+
+    Used to show *which part* of a source passage an answer draws on: the
+    sentence sharing the most significant terms with the question. Returns an
+    empty string when nothing overlaps, so the UI highlights nothing rather than
+    guessing.
+    """
+    terms = set(tokenize(query))
+    if not terms:
+        return ""
+    best, best_overlap = "", 0
+    for sentence in _SENTENCE_RE.split(text.strip()):
+        overlap = len(terms & set(tokenize(sentence)))
+        if overlap > best_overlap:
+            best, best_overlap = sentence.strip(), overlap
+    return best
 
 
 def chunk_text(text: str) -> list[str]:
